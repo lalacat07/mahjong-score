@@ -6,8 +6,8 @@ const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 
 规则：
 1. 玩家姓名原样使用截图中的显示文字，不推断或合并
-2. 如果玩家名字不可见或为空，根据其头像外观特征描述命名（如"蓝色头像玩家"），并在note中加上 [noname]
-3. 积分为正负整数，总和应为0（允许±1误差）
+2. 如果玩家名字完全不可见或为空，根据其头像外观特征描述命名（如"蓝色头像玩家"），并在note中加上 [noname]
+3. 积分必须是整数（正数或负数），总和应为0（允许±1误差）
 4. 如有时间戳（如 20:30），提取出来
 5. 只返回JSON，格式如下：
 
@@ -40,14 +40,9 @@ async function analyzeOneImage(
           content: [
             {
               type: "image_url",
-              image_url: {
-                url: `data:image/jpeg;base64,${base64}`,
-              },
+              image_url: { url: `data:image/jpeg;base64,${base64}` },
             },
-            {
-              type: "text",
-              text: PROMPT,
-            },
+            { type: "text", text: PROMPT },
           ],
         },
       ],
@@ -63,15 +58,19 @@ async function analyzeOneImage(
 
   const data = await res.json();
   const content: string = data.choices?.[0]?.message?.content || "";
-
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`AI 返回格式错误: ${content}`);
 
   // Fix non-standard JSON: remove + before positive numbers (e.g. +42 → 42)
   const cleaned = match[0].replace(/:\s*\+(\d)/g, ": $1");
   const parsed = JSON.parse(cleaned);
+
   return {
-    players: parsed.players || [],
+    players: (parsed.players || []).map((p: Record<string, unknown>) => ({
+      name: String(p.name || "").trim(),
+      // ── CRITICAL: always parseInt to avoid string concatenation bug ──
+      score: parseInt(String(p.score), 10) || 0,
+    })),
     time: parsed.time && parsed.time !== "null" ? parsed.time : undefined,
     valid: parsed.valid ?? true,
     note: parsed.note || "",
@@ -88,6 +87,25 @@ function areGamesDuplicate(a: SingleGame, b: SingleGame): boolean {
   return true;
 }
 
+/** Normalize name for comparison: strip trailing dots/ellipsis, lowercase */
+function normalizeName(name: string): string {
+  return name.replace(/[.…\s]+$/, "").toLowerCase().trim();
+}
+
+/**
+ * Fuzzy name match:
+ * - Exact after normalization (e.g. "Mr.CC " == "Mr.CC")
+ * - One is a prefix of the other (e.g. "Mr.C" is prefix of "Mr.CC")
+ */
+function areSimilarNames(a: string, b: string): boolean {
+  if (a.trim() === b.trim()) return true;
+  const na = normalizeName(a);
+  const nb = normalizeName(b);
+  if (na === nb) return true;
+  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+  return shorter.length >= 2 && longer.startsWith(shorter);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { scoreImages, albumImage, rate = 10 } = await req.json();
@@ -99,7 +117,6 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       );
     }
-
     if (!scoreImages || !Array.isArray(scoreImages) || scoreImages.length === 0) {
       return NextResponse.json(
         { success: false, error: "请上传至少一张战绩截图" },
@@ -107,14 +124,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Analyze each screenshot
+    // ── Analyze each screenshot ──────────────────────────────────────────
     const gameResults = await Promise.all(
       scoreImages.map((b64: string, i: number) =>
         analyzeOneImage(b64, key).then((r) => ({ ...r, index: i + 1 }))
       )
     );
 
-    // Build per-game data
+    // ── Build per-game data ──────────────────────────────────────────────
     const games: SingleGame[] = gameResults.map((g) => ({
       index: g.index,
       time: g.time,
@@ -128,12 +145,10 @@ export async function POST(req: NextRequest) {
 
     const warnings: Warning[] = [];
 
-    // ── 1. Detect duplicate games ──────────────────────────────────────────
-    const dupIndices: number[] = [];
+    // ── 1. Detect duplicate games ────────────────────────────────────────
     for (let i = 0; i < games.length; i++) {
       for (let j = i + 1; j < games.length; j++) {
         if (areGamesDuplicate(games[i], games[j])) {
-          if (!dupIndices.includes(j)) dupIndices.push(j);
           warnings.push({
             type: "duplicate",
             message: `第 ${i + 1} 张和第 ${j + 1} 张截图的战绩完全相同，疑似重复上传`,
@@ -143,76 +158,78 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 2. Detect nameless players (only via AI's [noname] flag) ──────────
+    // ── 2. Detect nameless players (AI-flagged only) ─────────────────────
     const noNameNotes: string[] = [];
     games.forEach((game, gi) => {
       const note = gameResults[gi]?.note || "";
       if (note.includes("[noname]")) {
-        const noNamePlayers = game.players.filter((p) => !p.name || p.name.trim() === "");
-        noNamePlayers.forEach((p) => {
-          noNameNotes.push(
-            `第 ${gi + 1} 场有玩家名字不可见，AI 已根据头像特征命名为「${p.name || "未知玩家"}」，请确认`
-          );
-        });
+        game.players
+          .filter((p) => !p.name || p.name.trim() === "")
+          .forEach((p) => {
+            noNameNotes.push(
+              `第 ${gi + 1} 场有玩家名字不可见，AI 已根据头像特征命名为「${p.name || "未知玩家"}」，请确认`
+            );
+          });
       }
     });
     if (noNameNotes.length > 0) {
-      warnings.push({
-        type: "noName",
-        message: noNameNotes.join("；"),
-      });
+      warnings.push({ type: "noName", message: noNameNotes.join("；") });
     }
 
-    // ── 3. Aggregate totals + detect duplicate names ───────────────────────
+    // ── 3. Aggregate totals ──────────────────────────────────────────────
     const totals = new Map<string, PlayerScore & { gameCount: number }>();
     games.forEach((game) => {
       game.players.forEach((p) => {
-        const existing = totals.get(p.name);
-        if (existing) {
-          existing.score += p.score;
-          existing.delta += p.delta;
-          existing.gameCount += 1;
+        const e = totals.get(p.name);
+        if (e) {
+          e.score += p.score;
+          e.delta += p.delta;
+          e.gameCount++;
         } else {
           totals.set(p.name, { name: p.name, score: p.score, delta: p.delta, gameCount: 1 });
         }
       });
     });
 
-    // Check for similar names that may be the same player (e.g. same first 2 chars)
+    // ── 4. Detect duplicate names (exact → auto-merge; fuzzy → ask user) ─
     const allNames = Array.from(totals.keys());
-    const mergedNames = new Set<string>();
+    const processed = new Set<string>();
+
     for (let i = 0; i < allNames.length; i++) {
       for (let j = i + 1; j < allNames.length; j++) {
         const a = allNames[i];
         const b = allNames[j];
-        // Same after trimming = exact duplicate name
-        if (a.trim() === b.trim() && a !== b) {
-          if (!mergedNames.has(b)) {
-            mergedNames.add(b);
-            const ea = totals.get(a)!;
-            const eb = totals.get(b)!;
-            ea.score += eb.score;
-            ea.delta += eb.delta;
-            ea.gameCount += eb.gameCount;
-            totals.delete(b);
-            warnings.push({
-              type: "duplicateName",
-              message: `发现重名玩家"${a}"，已自动合并`,
-            });
-          }
+        if (processed.has(b)) continue;
+
+        const isExact = a.trim() === b.trim();
+        const isFuzzy = !isExact && areSimilarNames(a, b);
+
+        if (isExact) {
+          // Auto-merge: fold b into a
+          processed.add(b);
+          const ea = totals.get(a)!;
+          const eb = totals.get(b)!;
+          ea.score += eb.score;
+          ea.delta += eb.delta;
+          ea.gameCount += eb.gameCount;
+          totals.delete(b);
+          warnings.push({
+            type: "duplicateName",
+            message: `发现完全相同的玩家名"${a}"，已自动合并`,
+          });
+        } else if (isFuzzy) {
+          // Flag but DO NOT auto-merge — let user decide
+          warnings.push({
+            type: "duplicateName",
+            message: `"${a}" 和 "${b}" 可能是同一人（截图中名字不完整），是否合并？`,
+            namePair: [a, b],
+          });
         }
       }
     }
 
-    const players: PlayerScore[] = Array.from(totals.values()).map((p) => ({
-      name: p.name,
-      score: p.score,
-      delta: p.delta,
-      gameCount: p.gameCount,
-    }));
-
+    const players: PlayerScore[] = Array.from(totals.values());
     const today = new Date().toISOString().split("T")[0];
-    const playerCount = players.length;
 
     const session: GameSession = {
       id: crypto.randomUUID(),
@@ -220,7 +237,7 @@ export async function POST(req: NextRequest) {
       title: `${today} 战绩`,
       rate,
       players,
-      playerCount,
+      playerCount: players.length,
       games: games.length > 0 ? games : undefined,
       warnings: warnings.length > 0 ? warnings : undefined,
     };
