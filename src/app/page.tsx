@@ -1,284 +1,450 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { GameSession, PlayerScore } from "@/lib/types";
+import { useState, useRef, useCallback } from "react";
+import { GameSession, Warning, PlayerScore } from "@/lib/types";
+import { getFestivalTheme } from "@/lib/festival";
 import ScoreCard from "@/components/ScoreCard";
 
-const DEFAULT_RATE = 10;
+const RATE = 10;
 
-export default function Home() {
-  const [apiKey, setApiKey] = useState("");
-  const [title, setTitle] = useState("今日战绩");
-  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
-  const [rate, setRate] = useState(DEFAULT_RATE);
-  const [sessions, setSessions] = useState<GameSession[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [dragOver, setDragOver] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+// ── helpers ──────────────────────────────────────────────────────────────
 
-  // Load API key from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem("deepseek_api_key");
-    if (saved) setApiKey(saved);
-  }, []);
+function applyDuplicateRemoval(session: GameSession, removedIdx: Set<number>): GameSession {
+  if (!session.games) return session;
+  const filtered = session.games
+    .filter((_, i) => !removedIdx.has(i))
+    .map((g, i) => ({ ...g, index: i + 1 }));
+  return recalc(session, filtered);
+}
 
-  const saveApiKey = (key: string) => {
-    setApiKey(key);
-    if (key) localStorage.setItem("deepseek_api_key", key);
-    else localStorage.removeItem("deepseek_api_key");
+function applyNameMerges(session: GameSession, merges: Map<string, string>): GameSession {
+  if (merges.size === 0) return session;
+  const renamed = session.games?.map((g) => ({
+    ...g,
+    players: g.players.map((p) => ({ ...p, name: merges.get(p.name) ?? p.name })),
+  }));
+  return recalc(session, renamed ?? []);
+}
+
+function recalc(session: GameSession, games: GameSession["games"]): GameSession {
+  const totals = new Map<string, PlayerScore & { gameCount: number }>();
+  (games ?? []).forEach((game) => {
+    game.players.forEach((p) => {
+      const e = totals.get(p.name);
+      if (e) { e.score += p.score; e.delta += p.delta; e.gameCount++; }
+      else totals.set(p.name, { name: p.name, score: p.score, delta: p.delta, gameCount: 1 });
+    });
+  });
+  const players: PlayerScore[] = Array.from(totals.values());
+  return { ...session, games: games && games.length > 0 ? games : undefined, players, playerCount: players.length };
+}
+
+/** Pick the more complete (non-truncated) name of a pair */
+function betterName(a: string, b: string): string {
+  const truncated = (s: string) => /[.…]+$/.test(s);
+  if (truncated(a) && !truncated(b)) return b;
+  if (!truncated(a) && truncated(b)) return a;
+  return a.length >= b.length ? a : b;
+}
+
+// ── ConfirmStep ───────────────────────────────────────────────────────────
+
+interface ConfirmStepProps {
+  session: GameSession;
+  onConfirm: (removedIdx: Set<number>, nameMerges: Map<string, string>) => void;
+  onBack: () => void;
+}
+
+function ConfirmStep({ session, onConfirm, onBack }: ConfirmStepProps) {
+  const theme = getFestivalTheme();
+
+  const warnings = session.warnings ?? [];
+  const dupGameWarnings  = warnings.filter((w) => w.type === "duplicate");
+  const autoMergedNames  = warnings.filter((w) => w.type === "duplicateName" && !w.namePair);
+  const fuzzyNameWarnings = warnings.filter((w) => w.type === "duplicateName" && w.namePair);
+  const noNameWarnings   = warnings.filter((w) => w.type === "noName");
+
+  // Duplicate game choices: key = "i-j", value = true → remove j
+  const [dupChoices, setDupChoices] = useState<Record<string, boolean>>(() => {
+    const init: Record<string, boolean> = {};
+    dupGameWarnings.forEach((w) => {
+      if (w.indices) init[`${w.indices[0]}-${w.indices[1]}`] = true;
+    });
+    return init;
+  });
+
+  // Fuzzy name choices: key = "nameA|||nameB", value = "a" | "b" | "none"
+  const [nameChoices, setNameChoices] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    fuzzyNameWarnings.forEach((w) => {
+      if (w.namePair) {
+        const key = w.namePair.join("|||");
+        init[key] = betterName(w.namePair[0], w.namePair[1]) === w.namePair[0] ? "a" : "b";
+      }
+    });
+    return init;
+  });
+
+  const handleConfirm = () => {
+    // Game duplicates: which to remove
+    const toRemove = new Set<number>();
+    dupGameWarnings.forEach((w) => {
+      if (w.indices && dupChoices[`${w.indices[0]}-${w.indices[1]}`]) {
+        toRemove.add(w.indices[1]);
+      }
+    });
+
+    // Fuzzy name merges
+    const merges = new Map<string, string>();
+    fuzzyNameWarnings.forEach((w) => {
+      if (!w.namePair) return;
+      const [a, b] = w.namePair;
+      const choice = nameChoices[`${a}|||${b}`];
+      if (choice === "a") merges.set(b, a);
+      else if (choice === "b") merges.set(a, b);
+      // "none" → keep both
+    });
+
+    onConfirm(toRemove, merges);
   };
 
-  const processImage = useCallback(
-    async (file: File) => {
-      if (!apiKey) {
-        setError("请先填写 DeepSeek API Key");
-        return;
-      }
-
-      setLoading(true);
-      setError("");
-
-      try {
-        // Convert to base64
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = reader.result as string;
-            resolve(result.split(",")[1]); // remove data:image/...;base64, prefix
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64: base64, apiKey, rate }),
-        });
-
-        const data = await res.json();
-
-        if (!data.success) {
-          setError(data.error || "识别失败");
-          return;
-        }
-
-        const newSession: GameSession = {
-          id: crypto.randomUUID(),
-          date,
-          title,
-          rate,
-          players: data.players as PlayerScore[],
-        };
-
-        setSessions((prev) => [...prev, newSession]);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "网络错误");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [apiKey, date, title, rate]
-  );
-
-  const handleFiles = useCallback(
-    (files: FileList | null) => {
-      if (!files) return;
-      Array.from(files).forEach((file) => {
-        if (file.type.startsWith("image/")) {
-          processImage(file);
-        }
-      });
-    },
-    [processImage]
-  );
-
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      handleFiles(e.dataTransfer.files);
-    },
-    [handleFiles]
-  );
-
-  const removeSession = (id: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-  };
+  const totalIssues = dupGameWarnings.length + fuzzyNameWarnings.length + noNameWarnings.length + autoMergedNames.length;
 
   return (
-    <main className="min-h-screen bg-slate-950">
-      {/* Header */}
-      <header className="border-b border-white/10 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold text-white">🀄 川麻战绩</h1>
-            <p className="text-xs text-white/40">AI 识别 · 一键生成卡片</p>
+    <div className="space-y-4">
+      <div className="bg-white/80 backdrop-blur rounded-2xl border border-white shadow-sm p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-lg">🔍</span>
+          <h2 className="font-bold text-gray-800 text-sm">AI 识别完成，请确认后生成</h2>
+        </div>
+        <p className="text-xs text-gray-400 ml-7">
+          共识别 {session.games?.length || 1} 场 · {session.playerCount} 人 · {totalIssues} 项需确认
+        </p>
+      </div>
+
+      {/* Duplicate games */}
+      {dupGameWarnings.length > 0 && (
+        <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span>🔁</span>
+            <span className="font-semibold text-orange-700 text-sm">疑似重复战绩</span>
           </div>
-          <button
-            onClick={() => setShowApiKey((v) => !v)}
-            className="text-xs text-white/40 hover:text-white/70 transition-colors"
-          >
-            ⚙️ API Key
-          </button>
+          {dupGameWarnings.map((w, i) => {
+            if (!w.indices) return null;
+            const key = `${w.indices[0]}-${w.indices[1]}`;
+            const [a, b] = [w.indices[0] + 1, w.indices[1] + 1];
+            return (
+              <div key={i} className="bg-white rounded-xl border border-orange-100 p-3 space-y-2">
+                <p className="text-xs text-orange-700">第 <b>{a}</b> 张 与 第 <b>{b}</b> 张截图战绩完全相同</p>
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name={`dup-${key}`} checked={dupChoices[key] === true}
+                      onChange={() => setDupChoices((p) => ({ ...p, [key]: true }))} className="accent-orange-500" />
+                    <span className="text-xs text-gray-700">保留第 {a} 张，删除第 {b} 张
+                      <span className="ml-1 text-[10px] text-orange-400 font-medium">推荐</span>
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name={`dup-${key}`} checked={dupChoices[key] === false}
+                      onChange={() => setDupChoices((p) => ({ ...p, [key]: false }))} className="accent-orange-500" />
+                    <span className="text-xs text-gray-700">两张都保留</span>
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Fuzzy name duplicates — user decides */}
+      {fuzzyNameWarnings.length > 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span>👥</span>
+            <span className="font-semibold text-yellow-700 text-sm">潜在重名玩家</span>
+          </div>
+          <p className="text-xs text-yellow-600 pl-1">以下玩家名字相似，可能因截图显示不完整导致识别差异</p>
+          {fuzzyNameWarnings.map((w, i) => {
+            if (!w.namePair) return null;
+            const [a, b] = w.namePair;
+            const key = `${a}|||${b}`;
+            return (
+              <div key={i} className="bg-white rounded-xl border border-yellow-100 p-3 space-y-2">
+                <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                  <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-lg">{a}</span>
+                  <span className="text-gray-400 text-xs">≈</span>
+                  <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-lg">{b}</span>
+                </div>
+                <div className="space-y-1.5 pt-1">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "a"}
+                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "a" }))} className="accent-yellow-500" />
+                    <span className="text-xs text-gray-700">合并，统一用 <b>{a}</b></span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "b"}
+                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "b" }))} className="accent-yellow-500" />
+                    <span className="text-xs text-gray-700">合并，统一用 <b>{b}</b></span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "none"}
+                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "none" }))} className="accent-yellow-500" />
+                    <span className="text-xs text-gray-700">不合并，当作两个人</span>
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Auto-merged exact names */}
+      {autoMergedNames.length > 0 && (
+        <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <span>✅</span>
+            <span className="font-semibold text-gray-600 text-sm">已自动合并（完全相同的名字）</span>
+          </div>
+          {autoMergedNames.map((w, i) => (
+            <p key={i} className="text-xs text-gray-500 pl-7">{w.message}</p>
+          ))}
+        </div>
+      )}
+
+      {/* No-name players */}
+      {noNameWarnings.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <span>👤</span>
+            <span className="font-semibold text-blue-700 text-sm">无名玩家已根据头像特征命名</span>
+          </div>
+          {noNameWarnings.map((w, i) => (
+            <p key={i} className="text-xs text-blue-600 pl-7">{w.message}</p>
+          ))}
+          <p className="text-[11px] text-blue-400 pl-7">请核对，如有误可在下方确认后手动修改</p>
+        </div>
+      )}
+
+      {/* Buttons */}
+      <div className="flex gap-3">
+        <button onClick={onBack}
+          className="flex-1 py-3 rounded-xl border border-gray-200 bg-white text-gray-600 font-semibold text-sm transition-all active:scale-95 hover:bg-gray-50">
+          ← 返回修改
+        </button>
+        <button onClick={handleConfirm}
+          className="flex-[2] py-3 rounded-xl text-white font-bold text-sm transition-all active:scale-95"
+          style={{ background: theme.cssGradient }}>
+          确认生成战绩卡 →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────
+
+type Step = "input" | "confirming" | "done";
+
+export default function Home() {
+  const theme = getFestivalTheme();
+
+  const [step, setStep] = useState<Step>("input");
+  const [scoreFiles, setScoreFiles] = useState<File[]>([]);
+  const [albumFile, setAlbumFile] = useState<File | null>(null);
+  const [sessions, setSessions] = useState<GameSession[]>([]);
+  const [pendingSession, setPendingSession] = useState<GameSession | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [dragOverScore, setDragOverScore] = useState(false);
+  const [dragOverAlbum, setDragOverAlbum] = useState(false);
+
+  const scoreInputRef = useRef<HTMLInputElement>(null);
+  const albumInputRef = useRef<HTMLInputElement>(null);
+
+  const handleScoreFiles = useCallback((files: FileList | null) => {
+    if (!files) return;
+    setScoreFiles((prev) => [...prev, ...Array.from(files).filter((f) => f.type.startsWith("image/"))]);
+  }, []);
+
+  const handleAlbumFile = useCallback((files: FileList | null) => {
+    if (files?.length) setAlbumFile(files[0]);
+  }, []);
+
+  const removeScoreFile = (i: number) => setScoreFiles((prev) => prev.filter((_, j) => j !== i));
+
+  const toBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const handleGenerate = async () => {
+    if (!scoreFiles.length) { setError("请先上传战绩截图"); return; }
+    setLoading(true);
+    setError("");
+    try {
+      const scoreBase64s = await Promise.all(scoreFiles.map(toBase64));
+      const albumBase64 = albumFile ? await toBase64(albumFile) : null;
+
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scoreImages: scoreBase64s, albumImage: albumBase64, rate: RATE }),
+      });
+      const data = await res.json();
+      if (!data.success) { setError(data.error || "识别失败，请重试"); return; }
+
+      const session = data.sessions[0] as GameSession;
+      const needsConfirm = session.warnings?.some(
+        (w: Warning) => w.type === "duplicate" || w.type === "duplicateName" || w.type === "noName"
+      );
+
+      if (needsConfirm) {
+        setPendingSession(session);
+        setStep("confirming");
+      } else {
+        setSessions([session]);
+        setStep("done");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "网络错误，请重试");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirm = (removedIdx: Set<number>, nameMerges: Map<string, string>) => {
+    if (!pendingSession) return;
+    let s = pendingSession;
+    if (removedIdx.size > 0) s = applyDuplicateRemoval(s, removedIdx);
+    if (nameMerges.size > 0) s = applyNameMerges(s, nameMerges);
+    setSessions([s]);
+    setStep("done");
+  };
+
+  const handleBack = () => { setPendingSession(null); setStep("input"); };
+  const handleReset = () => { setSessions([]); setPendingSession(null); setStep("input"); };
+
+  return (
+    <main className="min-h-screen" style={{ background: theme.pageBg }}>
+      <header style={{ background: theme.cssGradient }}>
+        <div className="max-w-2xl mx-auto px-5 py-4 flex items-center gap-3">
+          <span className="text-2xl">🀄</span>
+          <div>
+            <h1 className="text-lg font-bold text-white leading-tight">川麻战绩统计</h1>
+            <p className="text-xs text-white/70">上传截图，AI 自动生成战绩卡</p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {theme.name !== "默认" && (
+              <span className="text-xs bg-white/20 text-white px-2.5 py-0.5 rounded-full font-medium">
+                {theme.emoji} {theme.name}
+              </span>
+            )}
+            <span className="text-xs bg-white/15 text-white/80 px-2.5 py-0.5 rounded-full">¥10/分</span>
+          </div>
         </div>
       </header>
 
-      <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
-        {/* API Key Panel */}
-        {showApiKey && (
-          <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
-            <label className="block text-sm text-white/60 mb-2">
-              DeepSeek API Key{" "}
-              <a
-                href="https://platform.deepseek.com/api_keys"
-                target="_blank"
-                rel="noreferrer"
-                className="text-sky-400 hover:text-sky-300"
-              >
-                获取 →
-              </a>
-            </label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => saveApiKey(e.target.value)}
-              placeholder="sk-xxxxxxxxxxxxxxxx"
-              className="w-full bg-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/20 border border-white/10 focus:border-sky-500 focus:outline-none"
-            />
-            <p className="text-xs text-white/30 mt-2">
-              Key 仅保存在本地浏览器，不上传服务器
-            </p>
-          </div>
-        )}
+      <div className="max-w-2xl mx-auto px-5 py-6 space-y-4">
 
-        {/* Settings */}
-        <div className="bg-slate-900 rounded-2xl p-4 border border-white/10 space-y-3">
-          <h2 className="text-sm font-semibold text-white/70">本局设置</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs text-white/40 mb-1">日期</label>
-              <input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="w-full bg-slate-800 rounded-xl px-3 py-2 text-sm text-white border border-white/10 focus:border-sky-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-white/40 mb-1">
-                倍率（元/分）
-              </label>
-              <input
-                type="number"
-                value={rate}
-                onChange={(e) => setRate(Number(e.target.value))}
-                min={1}
-                className="w-full bg-slate-800 rounded-xl px-3 py-2 text-sm text-white border border-white/10 focus:border-sky-500 focus:outline-none"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="block text-xs text-white/40 mb-1">标题</label>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="今日战绩"
-              className="w-full bg-slate-800 rounded-xl px-3 py-2 text-sm text-white placeholder-white/20 border border-white/10 focus:border-sky-500 focus:outline-none"
-            />
-          </div>
-        </div>
-
-        {/* Upload Area */}
-        <div
-          onDrop={handleDrop}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onClick={() => fileInputRef.current?.click()}
-          className={`relative rounded-2xl border-2 border-dashed transition-all cursor-pointer ${
-            dragOver
-              ? "border-sky-400 bg-sky-400/10"
-              : "border-white/20 hover:border-white/40 bg-slate-900/50"
-          } p-10 text-center`}
-        >
-          {loading ? (
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-8 h-8 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm text-white/60">AI 识别中...</p>
-            </div>
-          ) : (
-            <>
-              <p className="text-3xl mb-3">📸</p>
-              <p className="text-white/70 font-medium">
-                拖拽战绩截图到这里
-              </p>
-              <p className="text-white/30 text-sm mt-1">
-                或点击选择图片（支持多张）
-              </p>
-            </>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => handleFiles(e.target.files)}
-          />
-        </div>
-
-        {/* Error */}
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-sm text-red-400">
-            ⚠️ {error}
-          </div>
-        )}
-
-        {/* No API Key hint */}
-        {!apiKey && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-sm text-amber-400">
-            💡 需要 DeepSeek API Key 才能识别图片。点右上角 ⚙️ 填写。
-          </div>
-        )}
-
-        {/* Score Cards */}
-        {sessions.length > 0 && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white/70">
-                战绩卡片（{sessions.length} 局）
-              </h2>
-              <button
-                onClick={() => setSessions([])}
-                className="text-xs text-white/30 hover:text-red-400 transition-colors"
-              >
-                清空全部
-              </button>
-            </div>
-            {sessions.map((session) => (
-              <div key={session.id} className="relative">
-                <button
-                  onClick={() => removeSession(session.id)}
-                  className="absolute -top-2 -right-2 z-10 w-6 h-6 rounded-full bg-red-500 text-white text-xs flex items-center justify-center hover:bg-red-400 transition-colors"
-                >
-                  ×
-                </button>
-                <ScoreCard session={session} />
+        {step === "input" && (
+          <>
+            {/* Score screenshots */}
+            <div className="bg-white/80 backdrop-blur rounded-2xl border border-white shadow-sm p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-800">战绩截图</h2>
+                  <p className="text-xs text-gray-400 mt-0.5">每局游戏结算界面截图，可多张</p>
+                </div>
+                <span className="text-xs font-medium text-orange-500 bg-orange-50 px-2 py-0.5 rounded-full">必须</span>
               </div>
-            ))}
+              <div onDrop={(e) => { e.preventDefault(); setDragOverScore(false); handleScoreFiles(e.dataTransfer.files); }}
+                onDragOver={(e) => { e.preventDefault(); setDragOverScore(true); }}
+                onDragLeave={() => setDragOverScore(false)}
+                onClick={() => scoreInputRef.current?.click()}
+                className={`rounded-xl border-2 border-dashed transition-all cursor-pointer p-6 text-center ${
+                  dragOverScore ? "border-orange-400 bg-orange-50" : "border-gray-200 hover:border-orange-300 hover:bg-orange-50/50"}`}>
+                <p className="text-2xl mb-1">📸</p>
+                <p className="text-sm text-gray-500">拖拽图片到这里，或点击选择</p>
+                <p className="text-xs text-gray-400 mt-1">支持多选</p>
+                <input ref={scoreInputRef} type="file" accept="image/*" multiple className="hidden"
+                  onChange={(e) => handleScoreFiles(e.target.files)} />
+              </div>
+              {scoreFiles.length > 0 && (
+                <div className="space-y-1.5">
+                  {scoreFiles.map((file, i) => (
+                    <div key={i} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
+                      <span className="text-xs text-gray-400 font-mono w-5 text-center">{i + 1}</span>
+                      <span className="text-sm text-gray-700 flex-1 truncate">{file.name}</span>
+                      <button onClick={() => removeScoreFile(i)} className="text-gray-300 hover:text-red-400 transition-colors text-lg leading-none">×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Album screenshot */}
+            <div className="bg-white/80 backdrop-blur rounded-2xl border border-white shadow-sm p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-800">相册截图</h2>
+                  <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">在手机相册找到这批战绩截图的缩略图页，截图上传，AI 可根据拍摄时间判断每场先后顺序</p>
+                </div>
+                <span className="text-xs font-medium text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full flex-shrink-0 ml-2">可选</span>
+              </div>
+              <div onDrop={(e) => { e.preventDefault(); setDragOverAlbum(false); handleAlbumFile(e.dataTransfer.files); }}
+                onDragOver={(e) => { e.preventDefault(); setDragOverAlbum(true); }}
+                onDragLeave={() => setDragOverAlbum(false)}
+                onClick={() => albumInputRef.current?.click()}
+                className={`rounded-xl border-2 border-dashed transition-all cursor-pointer p-5 text-center ${
+                  albumFile ? "border-green-300 bg-green-50" : dragOverAlbum ? "border-gray-300 bg-gray-50" : "border-gray-200 hover:border-gray-300"}`}>
+                {albumFile ? (
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="text-green-500 text-sm">✓</span>
+                    <span className="text-sm text-gray-700 truncate max-w-xs">{albumFile.name}</span>
+                    <button onClick={(e) => { e.stopPropagation(); setAlbumFile(null); }} className="text-gray-300 hover:text-red-400 text-lg leading-none ml-1">×</button>
+                  </div>
+                ) : (<><p className="text-xl mb-1">🖼️</p><p className="text-sm text-gray-400">点击上传相册截图</p></>)}
+                <input ref={albumInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleAlbumFile(e.target.files)} />
+              </div>
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-500 flex items-start gap-2">
+                <span>⚠️</span><span>{error}</span>
+              </div>
+            )}
+
+            <button onClick={handleGenerate} disabled={loading || !scoreFiles.length}
+              className="w-full py-4 rounded-2xl text-white font-bold text-base transition-all active:scale-[0.98] shadow-md disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none"
+              style={loading || !scoreFiles.length ? {} : { background: theme.cssGradient }}>
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  AI 识别中...
+                </span>
+              ) : "生成战绩卡 →"}
+            </button>
+          </>
+        )}
+
+        {step === "confirming" && pendingSession && (
+          <ConfirmStep session={pendingSession} onConfirm={handleConfirm} onBack={handleBack} />
+        )}
+
+        {step === "done" && sessions.length > 0 && (
+          <div className="space-y-6 pt-2">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-700">战绩卡片</h2>
+              <button onClick={handleReset} className="text-xs text-gray-400 hover:text-red-400 transition-colors">清空</button>
+            </div>
+            {sessions.map((s) => <ScoreCard key={s.id} session={s} />)}
           </div>
         )}
 
-        {/* Footer */}
-        <p className="text-center text-xs text-white/20 pb-6">
-          川麻战绩统计 · 数据仅在本地处理
-        </p>
+        <p className="text-center text-xs text-gray-400 pb-6">川麻战绩统计 · 战绩仅供娱乐 🀄</p>
       </div>
     </main>
   );

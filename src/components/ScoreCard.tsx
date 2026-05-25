@@ -3,17 +3,71 @@
 import { useRef } from "react";
 import { GameSession } from "@/lib/types";
 import { getFestivalTheme } from "@/lib/festival";
-import { rankPlayers, formatDelta } from "@/lib/buildReport";
+import { rankPlayers } from "@/lib/buildReport";
 
 interface ScoreCardProps {
   session: GameSession;
-  onDownload?: () => void;
 }
 
-export default function ScoreCard({ session, onDownload }: ScoreCardProps) {
+function Crown() {
+  return (
+    <svg width="18" height="13" viewBox="0 0 20 14" fill="none">
+      <path d="M1 13L3.5 5L7.5 9L10 1L12.5 9L16.5 5L19 13H1Z" fill="#D69E16" stroke="#B8840A" strokeWidth="0.5" />
+      <circle cx="10" cy="1" r="1.2" fill="#FFD700" />
+      <circle cx="1.5" cy="5" r="1" fill="#FFD700" />
+      <circle cx="18.5" cy="5" r="1" fill="#FFD700" />
+    </svg>
+  );
+}
+
+function RankBadge({ rank }: { rank: number }) {
+  const styles: Record<number, string> = {
+    1: "bg-gradient-to-b from-yellow-400 to-yellow-600 text-white",
+    2: "bg-gradient-to-b from-gray-300 to-gray-400 text-white",
+    3: "bg-gradient-to-b from-amber-500 to-amber-700 text-white",
+  };
+  const cls = styles[rank] || "bg-gray-200 text-gray-500";
+  return (
+    <div className={`w-6 h-6 rounded-full ${cls} flex items-center justify-center text-xs font-bold flex-shrink-0`}>
+      {rank}
+    </div>
+  );
+}
+
+function formatScore(score: number) {
+  return score > 0 ? `+${score}` : `${score}`;
+}
+function formatMoney(delta: number) {
+  if (delta > 0) return `¥+${Math.abs(delta).toFixed(0)}`;
+  if (delta < 0) return `¥-${Math.abs(delta).toFixed(0)}`;
+  return "¥0";
+}
+
+/** Compute table layout params based on number of games */
+function getTableLayout(numGames: number) {
+  if (numGames <= 5)  return { gameColW: 46, nameColW: 64, nameMaxChars: 6, cellPx: 6,  scoreFontPx: 11, headFontPx: 9  };
+  if (numGames <= 7)  return { gameColW: 40, nameColW: 58, nameMaxChars: 5, cellPx: 5,  scoreFontPx: 10, headFontPx: 8  };
+  if (numGames <= 9)  return { gameColW: 34, nameColW: 52, nameMaxChars: 4, cellPx: 4,  scoreFontPx: 10, headFontPx: 8  };
+  if (numGames <= 12) return { gameColW: 29, nameColW: 46, nameMaxChars: 4, cellPx: 3,  scoreFontPx: 9,  headFontPx: 7  };
+  return                     { gameColW: 25, nameColW: 40, nameMaxChars: 3, cellPx: 2,  scoreFontPx: 8,  headFontPx: 7  };
+}
+
+function truncate(str: string, max: number) {
+  return str.length > max ? str.slice(0, max) + "…" : str;
+}
+
+export default function ScoreCard({ session }: ScoreCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const theme = getFestivalTheme(session.date);
   const ranked = rankPlayers(session.players);
+  const numGames = session.games?.length || 0;
+  const gameCount = numGames || 1;
+  const playerCount = session.playerCount || ranked.length;
+
+  // Card width: fit the table content, minimum 360px
+  const tbl = getTableLayout(numGames);
+  const tableContentW = numGames > 0 ? tbl.nameColW + numGames * tbl.gameColW : 0;
+  const cardWidth = numGames > 0 ? Math.max(360, tableContentW + 32) : 360;
 
   const handleDownload = async () => {
     if (!cardRef.current) return;
@@ -21,135 +75,198 @@ export default function ScoreCard({ session, onDownload }: ScoreCardProps) {
       const html2canvas = (await import("html2canvas")).default;
       const canvas = await html2canvas(cardRef.current, {
         scale: 2,
-        backgroundColor: null,
+        backgroundColor: "#ffffff",
         useCORS: true,
+        width: cardRef.current.scrollWidth,
+        height: cardRef.current.scrollHeight,
       });
       const link = document.createElement("a");
-      link.download = `川麻战绩_${session.date}_${session.title || "战绩"}.png`;
+      link.download = `川麻战绩_${session.date}.png`;
       link.href = canvas.toDataURL("image/png");
       link.click();
-      onDownload?.();
     } catch (err) {
       console.error("下载失败:", err);
     }
   };
 
-  const getMedalEmoji = (index: number) => {
-    const medals = ["🥇", "🥈", "🥉", ""];
-    return medals[index] || "";
-  };
-
-  const winner = ranked[0];
-  const loser = ranked[ranked.length - 1];
-
   return (
-    <div className="flex flex-col items-center gap-4">
-      {/* Card */}
+    <div className="flex flex-col items-center gap-3 w-full">
+      {/* Card — width auto-sizes to fit table */}
       <div
         ref={cardRef}
-        className={`relative w-full max-w-sm rounded-2xl overflow-hidden bg-gradient-to-b ${theme.gradient} p-[2px]`}
+        className="bg-white rounded-2xl overflow-hidden shadow-lg"
+        style={{ width: cardWidth, maxWidth: "100%" }}
       >
-        <div className="rounded-2xl bg-slate-950/90 backdrop-blur-sm overflow-hidden">
-          {/* Header */}
-          <div className={`bg-gradient-to-r ${theme.gradient} px-5 pt-5 pb-4`}>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/70 text-xs font-medium tracking-widest uppercase">
-                  川麻战绩
-                </p>
-                <h2 className="text-white text-xl font-bold mt-0.5">
-                  {theme.emoji} {session.title || "今日战绩"}
-                </h2>
-              </div>
-              <div className="text-right">
-                <p className="text-white/60 text-xs">{session.date}</p>
-                <p className="text-white/80 text-sm font-medium mt-0.5">
-                  {session.rate}元/分
-                </p>
-              </div>
-            </div>
-          </div>
+        {/* ── Header ── */}
+        <div className="relative px-5 pt-5 pb-4 text-center" style={{ background: theme.cssGradient }}>
+          {theme.name !== "默认" && (
+            <span className="absolute top-3 left-3 text-[11px] font-semibold bg-white/25 text-white px-2.5 py-0.5 rounded-full">
+              {theme.emoji} {theme.name}
+            </span>
+          )}
+          <h2 className="text-2xl font-black text-white tracking-[0.3em] mt-2">川 麻 战 绩</h2>
+          <p className="text-white/80 text-xs mt-1.5 tracking-wide">
+            {session.date} · 共 {gameCount} 场 · {playerCount} 人参与
+          </p>
+        </div>
 
-          {/* Players */}
-          <div className="px-4 py-3 space-y-2">
+        {/* ── Rankings ── */}
+        <div className="px-4 pt-3 pb-1">
+          <p className="text-xs font-semibold text-gray-400 mb-2 tracking-wider">总积分排行</p>
+          <div className="space-y-1.5">
             {ranked.map((player, index) => {
-              const isWinner = index === 0;
-              const isLoser = index === ranked.length - 1;
+              const rank = index + 1;
+              const isMVP = rank === 1;
+              const isWinner = player.score > 0;
+              const showDivider = isWinner && ranked[index + 1] && ranked[index + 1].score <= 0;
               return (
-                <div
-                  key={player.name}
-                  className={`flex items-center justify-between rounded-xl px-3 py-2.5 ${
-                    isWinner
-                      ? "bg-yellow-500/15 border border-yellow-500/30"
-                      : isLoser
-                      ? "bg-red-500/10 border border-red-500/20"
-                      : "bg-white/5 border border-white/10"
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-lg w-6 text-center">
-                      {getMedalEmoji(index)}
-                    </span>
-                    <div>
-                      <p className={`font-semibold text-sm ${
-                        isWinner ? "text-yellow-300" : "text-white"
-                      }`}>
-                        {player.name}
+                <div key={player.name}>
+                  <div
+                    className="relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl overflow-hidden"
+                    style={
+                      isMVP
+                        ? { background: "linear-gradient(135deg,#FFF8E1 0%,#FFF3CC 100%)", border: "1px solid #D69E16" }
+                        : isWinner
+                        ? { background: "#f0fdf4", border: "1px solid #bbf7d0" }
+                        : { background: "#fff5f5", border: "1px solid #fecaca" }
+                    }
+                  >
+                    <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-xl"
+                      style={{ background: isMVP ? "#D69E16" : isWinner ? "#22c55e" : "#ef4444" }} />
+                    <div className="flex flex-col items-center w-7 flex-shrink-0 ml-0.5">
+                      {isMVP && <Crown />}
+                      <RankBadge rank={rank} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-sm truncate"
+                          style={{ color: isMVP ? "#92400e" : isWinner ? "#15803d" : "#b91c1c" }}>
+                          {player.name}
+                        </span>
+                        {isMVP && (
+                          <span className="text-[9px] font-bold bg-yellow-500 text-white px-1.5 py-0.5 rounded-full flex-shrink-0">MVP</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] mt-0.5" style={{ color: isMVP ? "#b45309" : isWinner ? "#16a34a" : "#dc2626" }}>
+                        {player.gameCount ? `${player.gameCount}场` : ""}
                       </p>
-                      <p className="text-white/40 text-xs">
-                        {player.score > 0 ? `+${player.score}` : player.score} 分
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-xl font-black leading-tight"
+                        style={{ color: isMVP ? "#a16207" : isWinner ? "#16a34a" : "#ef4444" }}>
+                        {formatScore(player.score)}
+                      </p>
+                      <p className="text-[11px] font-semibold"
+                        style={{ color: isMVP ? "#b45309" : isWinner ? "#22c55e" : "#f87171" }}>
+                        {formatMoney(player.delta)}
                       </p>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <p className={`font-bold text-lg ${
-                      player.delta > 0
-                        ? "text-green-400"
-                        : player.delta < 0
-                        ? "text-red-400"
-                        : "text-white/60"
-                    }`}>
-                      {formatDelta(player.delta)}
-                    </p>
-                  </div>
+                  {showDivider && (
+                    <div className="flex items-center gap-2 my-2">
+                      <div className="flex-1 h-px bg-gray-200" />
+                      <span className="text-[10px] text-gray-400 font-medium whitespace-nowrap">以上赢 · 以下输</span>
+                      <div className="flex-1 h-px bg-gray-200" />
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
+        </div>
 
-          {/* Summary */}
-          <div className="px-4 pb-4">
-            <div className={`rounded-xl px-4 py-3 ${theme.cardBg} border border-white/10`}>
-              <div className="flex justify-between text-xs">
-                <span className="text-white/50">🏆 大赢家</span>
-                <span className={`font-semibold ${theme.textColor}`}>
-                  {winner.name} {formatDelta(winner.delta)}
-                </span>
-              </div>
-              <div className="flex justify-between text-xs mt-1.5">
-                <span className="text-white/50">💸 大输家</span>
-                <span className="font-semibold text-red-400">
-                  {loser.name} {formatDelta(loser.delta)}
-                </span>
-              </div>
+        {/* ── Per-game matrix ── */}
+        {session.games && session.games.length > 1 && (
+          <div className="mx-4 mt-3 mb-1 rounded-xl border border-gray-100 overflow-hidden">
+            <div className="bg-gray-50 px-3 py-1.5 border-b border-gray-100">
+              <p className="text-xs font-semibold text-gray-500">逐场明细</p>
             </div>
-          </div>
 
-          {/* Footer */}
-          <div className="px-4 pb-4 text-center">
-            <p className="text-white/20 text-xs">
-              川麻战绩统计 · Powered by AI 🀄
-            </p>
+            {/* No overflow-x scroll — table is sized to fit card */}
+            <table style={{ width: "100%", tableLayout: "fixed", borderCollapse: "collapse" }}>
+              <colgroup>
+                <col style={{ width: tbl.nameColW }} />
+                {session.games.map((_, i) => (
+                  <col key={i} style={{ width: tbl.gameColW }} />
+                ))}
+              </colgroup>
+              <thead>
+                <tr style={{ background: "#f9fafb" }}>
+                  <th style={{
+                    textAlign: "left",
+                    padding: `${tbl.cellPx}px 6px`,
+                    fontSize: tbl.headFontPx,
+                    color: "#9ca3af",
+                    fontWeight: 500,
+                  }}>玩家</th>
+                  {session.games.map((g, i) => (
+                    <th key={i} style={{
+                      textAlign: "center",
+                      padding: `${tbl.cellPx}px 2px`,
+                      fontSize: tbl.headFontPx,
+                      color: "#9ca3af",
+                      fontWeight: 500,
+                      lineHeight: 1.3,
+                    }}>
+                      <div>场{i + 1}</div>
+                      <div style={{ fontSize: tbl.headFontPx - 1, color: "#d1d5db" }}>{g.time || "—"}</div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {ranked.map((player, ri) => (
+                  <tr key={player.name} style={{ borderTop: "1px solid #f3f4f6", background: ri % 2 === 0 ? "#fff" : "#fafafa" }}>
+                    <td style={{ padding: `${tbl.cellPx}px 6px`, fontWeight: 500, color: "#374151", whiteSpace: "nowrap" }}>
+                      <span style={{
+                        display: "inline-block", width: 6, height: 6, borderRadius: "50%", marginRight: 4, flexShrink: 0,
+                        background: player.score > 0 ? "#4ade80" : player.score < 0 ? "#f87171" : "#d1d5db",
+                        verticalAlign: "middle",
+                      }} />
+                      <span style={{ fontSize: tbl.scoreFontPx, verticalAlign: "middle" }}>
+                        {truncate(player.name, tbl.nameMaxChars)}
+                      </span>
+                    </td>
+                    {session.games!.map((game, gi) => {
+                      const gp = game.players.find((p) => p.name === player.name);
+                      if (!gp) return (
+                        <td key={gi} style={{ textAlign: "center", color: "#e5e7eb", fontSize: tbl.scoreFontPx, padding: `${tbl.cellPx}px 2px` }}>·</td>
+                      );
+                      const color = gp.score > 0 ? "#16a34a" : gp.score < 0 ? "#ef4444" : "#6b7280";
+                      const bg = gp.score > 0 ? "#f0fdf4" : gp.score < 0 ? "#fff5f5" : "#f9fafb";
+                      return (
+                        <td key={gi} style={{
+                          textAlign: "center",
+                          fontSize: tbl.scoreFontPx,
+                          fontWeight: 600,
+                          color,
+                          background: bg,
+                          padding: `${tbl.cellPx}px 2px`,
+                        }}>
+                          {formatScore(gp.score)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+        )}
+
+        {/* ── Footer ── */}
+        <div className="px-4 py-3 text-center">
+          <p style={{ fontSize: 10, color: "#d1d5db" }}>战绩仅供娱乐 · ¥10/分</p>
         </div>
       </div>
 
-      {/* Download Button */}
+      {/* Download button — same width as card */}
       <button
         onClick={handleDownload}
-        className="w-full max-w-sm px-6 py-3 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white font-semibold text-sm transition-all active:scale-95 shadow-lg shadow-blue-900/30"
+        className="py-3 rounded-xl text-white font-semibold text-sm transition-all active:scale-95 flex items-center justify-center gap-2"
+        style={{ width: cardWidth, maxWidth: "100%", background: theme.cssGradient }}
       >
-        📥 下载战绩卡片
+        <span>📥</span> 下载战绩卡片
       </button>
     </div>
   );
