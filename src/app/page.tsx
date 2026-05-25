@@ -272,12 +272,29 @@ export default function Home() {
 
   const removeScoreFile = (i: number) => setScoreFiles((prev) => prev.filter((_, j) => j !== i));
 
+  // Compress image to max 1280px wide / 85% quality before base64 encoding
+  // Prevents iOS Safari fetch-body-too-large error with multi-photo uploads
   const toBase64 = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve((reader.result as string).split(",")[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const MAX = 1280;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          if (width >= height) { height = Math.round((height / width) * MAX); width = MAX; }
+          else { width = Math.round((width / height) * MAX); height = MAX; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        resolve(dataUrl.split(",")[1]);
+      };
+      img.onerror = reject;
+      img.src = url;
     });
 
   const handleGenerate = async () => {

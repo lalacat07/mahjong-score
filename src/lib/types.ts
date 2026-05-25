@@ -1,8 +1,7 @@
 export interface Warning {
   type: "duplicate" | "noName" | "duplicateName";
   message: string;
-  indices?: number[];     // for game duplicates: 0-based game indices
-  namePair?: [string, string]; // for fuzzy name duplicates: [nameA, nameB]
+  indices?: number[]; // for duplicates: which game indices
 }
 
 export interface PlayerScore {
