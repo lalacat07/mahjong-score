@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { GameSession } from "@/lib/types";
 import { getFestivalTheme } from "@/lib/festival";
 import { rankPlayers } from "@/lib/buildReport";
@@ -58,6 +58,7 @@ function truncate(str: string, max: number) {
 
 export default function ScoreCard({ session }: ScoreCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const theme = getFestivalTheme(session.date);
   const ranked = rankPlayers(session.players);
   const numGames = session.games?.length || 0;
@@ -73,17 +74,50 @@ export default function ScoreCard({ session }: ScoreCardProps) {
     if (!cardRef.current) return;
     try {
       const html2canvas = (await import("html2canvas")).default;
-      const canvas = await html2canvas(cardRef.current, {
+      const el = cardRef.current;
+
+      // Pin width to a fixed pixel value so html2canvas doesn't misalign flex children
+      const originalWidth = el.style.width;
+      el.style.width = el.offsetWidth + "px";
+
+      const canvas = await html2canvas(el, {
         scale: 2,
         backgroundColor: "#ffffff",
         useCORS: true,
-        width: cardRef.current.scrollWidth,
-        height: cardRef.current.scrollHeight,
+        allowTaint: false,
+        logging: false,
+        windowWidth: el.scrollWidth,
+        windowHeight: el.scrollHeight,
       });
-      const link = document.createElement("a");
-      link.download = `川麻战绩_${session.date}.png`;
-      link.href = canvas.toDataURL("image/png");
-      link.click();
+
+      el.style.width = originalWidth;
+
+      const dataUrl = canvas.toDataURL("image/png");
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+      if (isIOS) {
+        // Try Web Share API with file (iOS 15+)
+        try {
+          if (navigator.canShare && navigator.share) {
+            const blob = await (await fetch(dataUrl)).blob();
+            const file = new File([blob], `川麻战绩_${session.date}.png`, { type: "image/png" });
+            if (navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: "川麻战绩" });
+              return;
+            }
+          }
+        } catch {
+          // share was cancelled or not supported — fall through to modal
+        }
+        // Fallback: show modal for long-press save
+        setPreviewUrl(dataUrl);
+      } else {
+        // Android / desktop: direct download
+        const link = document.createElement("a");
+        link.download = `川麻战绩_${session.date}.png`;
+        link.href = dataUrl;
+        link.click();
+      }
     } catch (err) {
       console.error("下载失败:", err);
     }
@@ -268,6 +302,28 @@ export default function ScoreCard({ session }: ScoreCardProps) {
       >
         <span>📥</span> 下载战绩卡片
       </button>
+
+      {/* iOS long-press save modal */}
+      {previewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/70 px-4"
+          onClick={() => setPreviewUrl(null)}
+        >
+          <div
+            className="bg-white rounded-2xl overflow-hidden shadow-2xl flex flex-col items-center p-4 gap-3 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-semibold text-gray-700">长按图片保存到相册 📸</p>
+            <img src={previewUrl} alt="战绩卡片" style={{ maxWidth: "100%", borderRadius: 12 }} />
+            <button
+              onClick={() => setPreviewUrl(null)}
+              className="w-full py-2.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium"
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
