@@ -39,12 +39,12 @@ function recalc(session: GameSession, games: GameSession["games"]): GameSession 
   return { ...session, games: games && games.length > 0 ? games : undefined, players, playerCount: players.length };
 }
 
-/** Pick the more complete (non-truncated) name of a pair */
-function betterName(a: string, b: string): string {
+/** Pick the best canonical name from a cluster: prefer non-truncated, then longest */
+function bestNameInCluster(names: string[]): string {
   const truncated = (s: string) => /[.…]+$/.test(s);
-  if (truncated(a) && !truncated(b)) return b;
-  if (!truncated(a) && truncated(b)) return a;
-  return a.length >= b.length ? a : b;
+  const nonTruncated = names.filter((n) => !truncated(n));
+  const pool = nonTruncated.length > 0 ? nonTruncated : names;
+  return pool.reduce((best, n) => (n.length >= best.length ? n : best), pool[0]);
 }
 
 // ── ConfirmStep ───────────────────────────────────────────────────────────
@@ -60,8 +60,8 @@ function ConfirmStep({ session, onConfirm, onBack }: ConfirmStepProps) {
 
   const warnings = session.warnings ?? [];
   const dupGameWarnings  = warnings.filter((w) => w.type === "duplicate");
-  const autoMergedNames  = warnings.filter((w) => w.type === "duplicateName" && !w.namePair);
-  const fuzzyNameWarnings = warnings.filter((w) => w.type === "duplicateName" && w.namePair);
+  const autoMergedNames  = warnings.filter((w) => w.type === "duplicateName" && !w.nameCluster);
+  const fuzzyNameWarnings = warnings.filter((w) => w.type === "duplicateName" && w.nameCluster);
   const noNameWarnings   = warnings.filter((w) => w.type === "noName");
 
   // Duplicate game choices: key = "i-j", value = true → remove j
@@ -73,13 +73,13 @@ function ConfirmStep({ session, onConfirm, onBack }: ConfirmStepProps) {
     return init;
   });
 
-  // Fuzzy name choices: key = "nameA|||nameB", value = "a" | "b" | "none"
+  // Fuzzy name choices: key = sorted cluster members joined by "|||", value = chosen name or "none"
   const [nameChoices, setNameChoices] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
     fuzzyNameWarnings.forEach((w) => {
-      if (w.namePair) {
-        const key = w.namePair.join("|||");
-        init[key] = betterName(w.namePair[0], w.namePair[1]) === w.namePair[0] ? "a" : "b";
+      if (w.nameCluster) {
+        const key = [...w.nameCluster].sort().join("|||");
+        init[key] = bestNameInCluster(w.nameCluster);
       }
     });
     return init;
@@ -97,12 +97,13 @@ function ConfirmStep({ session, onConfirm, onBack }: ConfirmStepProps) {
     // Fuzzy name merges
     const merges = new Map<string, string>();
     fuzzyNameWarnings.forEach((w) => {
-      if (!w.namePair) return;
-      const [a, b] = w.namePair;
-      const choice = nameChoices[`${a}|||${b}`];
-      if (choice === "a") merges.set(b, a);
-      else if (choice === "b") merges.set(a, b);
-      // "none" → keep both
+      if (!w.nameCluster) return;
+      const key = [...w.nameCluster].sort().join("|||");
+      const chosen = nameChoices[key];
+      if (!chosen || chosen === "none") return;
+      w.nameCluster.forEach((name) => {
+        if (name !== chosen) merges.set(name, chosen);
+      });
     });
 
     onConfirm(toRemove, merges);
@@ -164,37 +165,41 @@ function ConfirmStep({ session, onConfirm, onBack }: ConfirmStepProps) {
             <span className="font-semibold text-yellow-700 text-sm">潜在重名玩家</span>
           </div>
           <p className="text-xs text-yellow-600 pl-1">以下玩家名字相似，可能因截图显示不完整导致识别差异</p>
-          {fuzzyNameWarnings.map((w, i) => {
-            if (!w.namePair) return null;
-            const [a, b] = w.namePair;
-            const key = `${a}|||${b}`;
-            return (
-              <div key={i} className="bg-white rounded-xl border border-yellow-100 p-3 space-y-2">
-                <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-                  <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-lg">{a}</span>
-                  <span className="text-gray-400 text-xs">≈</span>
-                  <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-lg">{b}</span>
+          {(() => {
+            const seen = new Set<string>();
+            return fuzzyNameWarnings.filter((w) => {
+              if (!w.nameCluster) return false;
+              const k = [...w.nameCluster].sort().join("|||");
+              if (seen.has(k)) return false;
+              seen.add(k);
+              return true;
+            }).map((w, i) => {
+              const key = [...w.nameCluster!].sort().join("|||");
+              return (
+                <div key={i} className="bg-white rounded-xl border border-yellow-100 p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {w.nameCluster!.map((name, ni) => (
+                      <span key={ni} className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-lg text-sm font-semibold">{name}</span>
+                    ))}
+                  </div>
+                  <div className="space-y-1.5 pt-1">
+                    {w.nameCluster!.map((name) => (
+                      <label key={name} className="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" name={`name-${key}`} checked={nameChoices[key] === name}
+                          onChange={() => setNameChoices((p) => ({ ...p, [key]: name }))} className="accent-yellow-500" />
+                        <span className="text-xs text-gray-700">合并，统一用 <b>{name}</b></span>
+                      </label>
+                    ))}
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "none"}
+                        onChange={() => setNameChoices((p) => ({ ...p, [key]: "none" }))} className="accent-yellow-500" />
+                      <span className="text-xs text-gray-700">不合并，当作不同的人</span>
+                    </label>
+                  </div>
                 </div>
-                <div className="space-y-1.5 pt-1">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "a"}
-                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "a" }))} className="accent-yellow-500" />
-                    <span className="text-xs text-gray-700">合并，统一用 <b>{a}</b></span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "b"}
-                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "b" }))} className="accent-yellow-500" />
-                    <span className="text-xs text-gray-700">合并，统一用 <b>{b}</b></span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="radio" name={`name-${key}`} checked={nameChoices[key] === "none"}
-                      onChange={() => setNameChoices((p) => ({ ...p, [key]: "none" }))} className="accent-yellow-500" />
-                    <span className="text-xs text-gray-700">不合并，当作两个人</span>
-                  </label>
-                </div>
-              </div>
-            );
-          })}
+              );
+            });
+          })()}
         </div>
       )}
 

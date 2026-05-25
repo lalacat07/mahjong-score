@@ -191,40 +191,63 @@ export async function POST(req: NextRequest) {
       });
     });
 
-    // ── 4. Detect duplicate names (exact → auto-merge; fuzzy → ask user) ─
-    const allNames = Array.from(totals.keys());
-    const processed = new Set<string>();
+    // ── 4. Detect duplicate names (exact → auto-merge; fuzzy → cluster card) ─
 
+    // Step A: auto-merge exact matches
+    const allNames = Array.from(totals.keys());
+    const exactProcessed = new Set<string>();
     for (let i = 0; i < allNames.length; i++) {
       for (let j = i + 1; j < allNames.length; j++) {
-        const a = allNames[i];
-        const b = allNames[j];
-        if (processed.has(b)) continue;
-
-        const isExact = a.trim() === b.trim();
-        const isFuzzy = !isExact && areSimilarNames(a, b);
-
-        if (isExact) {
-          // Auto-merge: fold b into a
-          processed.add(b);
+        const a = allNames[i], b = allNames[j];
+        if (exactProcessed.has(a) || exactProcessed.has(b)) continue;
+        if (a.trim() === b.trim()) {
+          exactProcessed.add(b);
           const ea = totals.get(a)!;
           const eb = totals.get(b)!;
           ea.score += eb.score;
           ea.delta += eb.delta;
           ea.gameCount += eb.gameCount;
           totals.delete(b);
-          warnings.push({
-            type: "duplicateName",
-            message: `发现完全相同的玩家名"${a}"，已自动合并`,
-          });
-        } else if (isFuzzy) {
-          // Flag but DO NOT auto-merge — let user decide
-          warnings.push({
-            type: "duplicateName",
-            message: `"${a}" 和 "${b}" 可能是同一人（截图中名字不完整），是否合并？`,
-            namePair: [a, b],
-          });
+          warnings.push({ type: "duplicateName", message: `发现完全相同的玩家名"${a}"，已自动合并` });
         }
+      }
+    }
+
+    // Step B: union-find to cluster fuzzy-similar names among remaining names
+    const remainingNames = Array.from(totals.keys());
+    const ufParent = new Map<string, string>();
+    const ufFind = (x: string): string => {
+      if (!ufParent.has(x)) ufParent.set(x, x);
+      if (ufParent.get(x) !== x) ufParent.set(x, ufFind(ufParent.get(x)!));
+      return ufParent.get(x)!;
+    };
+    const ufUnion = (a: string, b: string) => {
+      const ra = ufFind(a), rb = ufFind(b);
+      if (ra !== rb) ufParent.set(rb, ra);
+    };
+
+    for (let i = 0; i < remainingNames.length; i++) {
+      for (let j = i + 1; j < remainingNames.length; j++) {
+        if (areSimilarNames(remainingNames[i], remainingNames[j])) {
+          ufUnion(remainingNames[i], remainingNames[j]);
+        }
+      }
+    }
+
+    // Emit one warning per cluster with 2+ members
+    const clusters = new Map<string, string[]>();
+    for (const name of remainingNames) {
+      const root = ufFind(name);
+      if (!clusters.has(root)) clusters.set(root, []);
+      clusters.get(root)!.push(name);
+    }
+    for (const members of Array.from(clusters.values())) {
+      if (members.length >= 2) {
+        warnings.push({
+          type: "duplicateName",
+          message: `以下名字可能是同一人：${members.join("、")}`,
+          nameCluster: members,
+        });
       }
     }
 
