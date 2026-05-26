@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PlayerScore, SingleGame, GameSession, Warning } from "@/lib/types";
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.ARK_API_KEY,
+  baseURL: "https://ark.cn-beijing.volces.com/api/v3",
+});
 
 const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 分析这张游戏结算截图，提取每位玩家的姓名和积分。
@@ -21,43 +27,26 @@ const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 }`;
 
 async function analyzeOneImage(
-  base64: string,
-  apiKey: string
+  base64: string
 ): Promise<{ players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string }> {
-  const url = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "glm-4v-flash",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: { url: `data:image/jpeg;base64,${base64}` },
-            },
-            { type: "text", text: PROMPT },
-          ],
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 800,
-    }),
+  const response = await client.chat.completions.create({
+    model: "doubao-pro-32k",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${base64}` },
+          },
+          { type: "text", text: PROMPT },
+        ],
+      },
+    ],
+    max_tokens: 2048,
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`GLM API 错误 ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
-  const content: string = data.choices?.[0]?.message?.content || "";
+  const content = response.choices[0].message.content || "";
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`AI 返回格式错误: ${content}`);
 
@@ -110,10 +99,9 @@ export async function POST(req: NextRequest) {
   try {
     const { scoreImages, albumImage, rate = 10 } = await req.json();
 
-    const key = process.env.GLM_API_KEY;
-    if (!key) {
+    if (!process.env.ARK_API_KEY) {
       return NextResponse.json(
-        { success: false, error: "服务器未配置 GLM API Key" },
+        { success: false, error: "服务器未配置 ARK API Key" },
         { status: 500 }
       );
     }
@@ -127,7 +115,7 @@ export async function POST(req: NextRequest) {
     // ── Analyze each screenshot ──────────────────────────────────────────
     const gameResults = await Promise.all(
       scoreImages.map((b64: string, i: number) =>
-        analyzeOneImage(b64, key).then((r) => ({ ...r, index: i + 1 }))
+        analyzeOneImage(b64).then((r) => ({ ...r, index: i + 1 }))
       )
     );
 
