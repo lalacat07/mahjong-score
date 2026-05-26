@@ -36,15 +36,15 @@ async function analyzeOneImage(
         {
           role: "user",
           content: [
+            { type: "text", text: PROMPT },
             {
               type: "image_url",
               image_url: { url: `data:image/jpeg;base64,${base64}` },
             },
-            { type: "text", text: PROMPT },
           ],
         },
       ],
-      max_tokens: 2048,
+      max_tokens: 1024,
     }),
   });
 
