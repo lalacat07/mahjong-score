@@ -1,11 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PlayerScore, SingleGame, GameSession, Warning } from "@/lib/types";
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  apiKey: process.env.ARK_API_KEY,
-  baseURL: "https://ark.cn-beijing.volces.com/api/v3",
-});
 
 const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 分析这张游戏结算截图，提取每位玩家的姓名和积分。
@@ -29,24 +23,38 @@ const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 async function analyzeOneImage(
   base64: string
 ): Promise<{ players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string }> {
-  const response = await client.chat.completions.create({
-    model: "doubao-pro-32k",
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { url: `data:image/jpeg;base64,${base64}` },
-          },
-          { type: "text", text: PROMPT },
-        ],
-      },
-    ],
-    max_tokens: 2048,
+  const apiKey = process.env.GLM_API_KEY;
+  const response = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "glm-4v-flash",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${base64}` },
+            },
+            { type: "text", text: PROMPT },
+          ],
+        },
+      ],
+      max_tokens: 2048,
+    }),
   });
 
-  const content = response.choices[0].message.content || "";
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`GLM API错误: ${err}`);
+  }
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content || "";
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`AI 返回格式错误: ${content}`);
 
@@ -99,9 +107,9 @@ export async function POST(req: NextRequest) {
   try {
     const { scoreImages, albumImage, rate = 10 } = await req.json();
 
-    if (!process.env.ARK_API_KEY) {
+    if (!process.env.GLM_API_KEY) {
       return NextResponse.json(
-        { success: false, error: "服务器未配置 ARK API Key" },
+        { success: false, error: "服务器未配置 GLM API Key" },
         { status: 500 }
       );
     }
