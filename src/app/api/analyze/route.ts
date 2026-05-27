@@ -21,10 +21,11 @@ NOTE:如有异常说明`;
 function parseGlmResponse(
   content: string
 ): { players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string } {
-  const players: { name: string; score: number }[] = [];
   let time: string | undefined;
   let note = "";
 
+  // Strategy 1: expected PLAYER:/SCORE: format
+  const players: { name: string; score: number }[] = [];
   for (const rawLine of content.split("\n")) {
     const line = rawLine.trim();
     if (line.startsWith("PLAYER:")) {
@@ -42,8 +43,39 @@ function parseGlmResponse(
       note = line.slice(5).trim();
     }
   }
+  if (players.length > 0) return { players, time, valid: true, note };
 
-  return { players, time, valid: players.length > 0, note };
+  // Strategy 2: GLM returned JSON despite instructions
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const cleaned = jsonMatch[0]
+        .replace(/:\s*\+(\d)/g, ": $1")
+        .replace(/}\s*{/g, "},{")
+        .replace(/,(\s*[}\]])/g, "$1");
+      const parsed = JSON.parse(cleaned);
+      const jsonPlayers = ((parsed.players || []) as Record<string, unknown>[])
+        .map((p) => ({ name: String(p.name || "").trim(), score: parseInt(String(p.score), 10) || 0 }))
+        .filter((p) => p.name);
+      if (jsonPlayers.length > 0) {
+        return {
+          players: jsonPlayers,
+          time: parsed.time && parsed.time !== "null" ? String(parsed.time) : undefined,
+          valid: true,
+          note: String(parsed.note || ""),
+        };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Strategy 3: loose regex — match lines like "玩家名：+42" or "玩家名: -10"
+  const looseMatches = [...content.matchAll(/^(.{1,20}?)[：:]\s*([+-]?\d+)\s*$/gm)];
+  const loosePlayers = looseMatches
+    .map((m) => ({ name: m[1].trim(), score: parseInt(m[2], 10) }))
+    .filter((p) => p.name && !isNaN(p.score) && !/时间|time|note|valid/i.test(p.name));
+  if (loosePlayers.length > 0) return { players: loosePlayers, time, valid: true, note };
+
+  return { players: [], time, valid: false, note };
 }
 
 async function analyzeOneImage(
@@ -94,8 +126,11 @@ async function analyzeOneImage(
     }
 
     const content = data.choices?.[0]?.message?.content || "";
+    console.log(`[GLM attempt ${attempt + 1}] raw response:`, content);
     const result = parseGlmResponse(content);
-    if (result.players.length === 0) throw new Error(`AI 返回格式错误: ${content}`);
+    if (result.players.length === 0) {
+      throw new Error(`AI 返回格式错误。GLM原始回复: ${content.slice(0, 300)}`);
+    }
     return result;
   }
 
