@@ -8,75 +8,98 @@ const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 
 规则：
 1. 玩家姓名原样使用截图中的显示文字，不推断或合并
-2. 如果玩家名字完全不可见或为空，根据其头像外观特征描述命名（如"蓝色头像玩家"），并在note中加上 [noname]
+2. 如果玩家名字完全不可见或为空，根据其头像外观特征描述命名（如"蓝色头像玩家"），并在NOTE行末尾加 [noname]
 3. 积分必须是整数（正数或负数），总和应为0（允许±1误差）
-4. 如有时间戳（如 20:30），提取出来
-5. 只返回JSON，格式如下：
+4. 如有时间戳（如 20:30），输出TIME行
 
-{
-  "players": [
-    {"name": "玩家名", "score": 积分整数}
-  ],
-  "time": "HH:MM或null",
-  "valid": true,
-  "note": "如有异常备注"
-}`;
+只输出以下格式，每行一条，不要输出任何其他内容：
+PLAYER:玩家名,SCORE:+42
+PLAYER:玩家名,SCORE:-23
+TIME:20:30
+NOTE:如有异常说明`;
+
+function parseGlmResponse(
+  content: string
+): { players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string } {
+  const players: { name: string; score: number }[] = [];
+  let time: string | undefined;
+  let note = "";
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (line.startsWith("PLAYER:")) {
+      const rest = line.slice(7);
+      const scoreIdx = rest.lastIndexOf(",SCORE:");
+      if (scoreIdx !== -1) {
+        const name = rest.slice(0, scoreIdx).trim();
+        const score = parseInt(rest.slice(scoreIdx + 7).trim(), 10);
+        if (name && !isNaN(score)) players.push({ name, score });
+      }
+    } else if (line.startsWith("TIME:")) {
+      const t = line.slice(5).trim();
+      if (t && t !== "null") time = t;
+    } else if (line.startsWith("NOTE:")) {
+      note = line.slice(5).trim();
+    }
+  }
+
+  return { players, time, valid: players.length > 0, note };
+}
 
 async function analyzeOneImage(
   base64: string
 ): Promise<{ players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string }> {
   const apiKey = process.env.GLM_API_KEY;
-  const response = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "glm-4.6v-flash",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: PROMPT },
-            {
-              type: "image_url",
-              // GLM API expects raw base64 only — no data URI prefix
-              image_url: { url: base64 },
-            },
-          ],
-        },
-      ],
-      max_tokens: 1024,
-    }),
-  });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`GLM API错误: ${err}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 3000));
+
+    const response = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "glm-4.6v-flash",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: PROMPT },
+              {
+                type: "image_url",
+                // GLM API expects raw base64 only — no data URI prefix
+                image_url: { url: base64 },
+              },
+            ],
+          },
+        ],
+        max_tokens: 512,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      const isRateLimit = errText.includes("1302") || errText.includes("1305");
+      if (isRateLimit && attempt < 2) continue;
+      throw new Error(`GLM API错误: ${errText}`);
+    }
+
+    const data = await response.json();
+    // GLM sometimes returns 200 with an error body
+    if (data.error?.code === 1302 || data.error?.code === 1305) {
+      if (attempt < 2) continue;
+      throw new Error("GLM 服务繁忙，请稍后重试");
+    }
+
+    const content = data.choices?.[0]?.message?.content || "";
+    const result = parseGlmResponse(content);
+    if (result.players.length === 0) throw new Error(`AI 返回格式错误: ${content}`);
+    return result;
   }
 
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content || "";
-  const match = content.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`AI 返回格式错误: ${content}`);
-
-  const cleaned = match[0]
-    .replace(/:\s*\+(\d)/g, ": $1")   // +42 → 42
-    .replace(/}\s*{/g, "},{")          // missing comma between array objects
-    .replace(/,(\s*[}\]])/g, "$1");    // trailing commas before ] or }
-  const parsed = JSON.parse(cleaned);
-
-  return {
-    players: (parsed.players || []).map((p: Record<string, unknown>) => ({
-      name: String(p.name || "").trim(),
-      // ── CRITICAL: always parseInt to avoid string concatenation bug ──
-      score: parseInt(String(p.score), 10) || 0,
-    })),
-    time: parsed.time && parsed.time !== "null" ? parsed.time : undefined,
-    valid: parsed.valid ?? true,
-    note: parsed.note || "",
-  };
+  throw new Error("GLM 多次重试失败，请稍后再试");
 }
 
 /** Check if two games are identical (same players + same scores) */
