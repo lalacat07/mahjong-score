@@ -113,20 +113,32 @@ async function analyzeOneImage(
 
     if (!response.ok) {
       const errText = await response.text();
+      console.log(`[GLM attempt ${attempt + 1}] non-200 (${response.status}):`, errText.slice(0, 300));
       const isRateLimit = errText.includes("1302") || errText.includes("1305");
       if (isRateLimit && attempt < 2) continue;
-      throw new Error(`GLM API错误: ${errText}`);
+      throw new Error(`GLM API错误 ${response.status}: ${errText.slice(0, 200)}`);
     }
 
     const data = await response.json();
-    // GLM sometimes returns 200 with an error body
-    if (data.error?.code === 1302 || data.error?.code === 1305) {
+    console.log(`[GLM attempt ${attempt + 1}] full response:`, JSON.stringify(data).slice(0, 500));
+
+    // GLM sometimes returns 200 with an error body; code may be a number or string
+    const errCode = String(data.error?.code ?? data.code ?? "");
+    if (errCode === "1302" || errCode === "1305") {
       if (attempt < 2) continue;
       throw new Error("GLM 服务繁忙，请稍后重试");
     }
 
-    const content = data.choices?.[0]?.message?.content || "";
-    console.log(`[GLM attempt ${attempt + 1}] raw response:`, content);
+    // content may be in message.content (non-streaming) or delta.content (streaming)
+    const content: string =
+      data.choices?.[0]?.message?.content ||
+      data.choices?.[0]?.delta?.content ||
+      "";
+
+    if (!content) {
+      throw new Error(`GLM空内容，完整响应: ${JSON.stringify(data).slice(0, 300)}`);
+    }
+
     const result = parseGlmResponse(content);
     if (result.players.length === 0) {
       throw new Error(`AI 返回格式错误。GLM原始回复: ${content.slice(0, 300)}`);
