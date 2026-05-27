@@ -31,7 +31,7 @@ async function analyzeOneImage(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "glm-4v-flash",
+      model: "glm-4.6v-flash",
       messages: [
         {
           role: "user",
@@ -39,7 +39,8 @@ async function analyzeOneImage(
             { type: "text", text: PROMPT },
             {
               type: "image_url",
-              image_url: { url: `data:image/jpeg;base64,${base64}` },
+              // GLM API expects raw base64 only — no data URI prefix
+              image_url: { url: base64 },
             },
           ],
         },
