@@ -61,8 +61,10 @@ async function analyzeOneImage(
   const match = content.match(/\{[\s\S]*\}/);
   if (!match) throw new Error(`AI 返回格式错误: ${content}`);
 
-  // Fix non-standard JSON: remove + before positive numbers (e.g. +42 → 42)
-  const cleaned = match[0].replace(/:\s*\+(\d)/g, ": $1");
+  const cleaned = match[0]
+    .replace(/:\s*\+(\d)/g, ": $1")   // +42 → 42
+    .replace(/}\s*{/g, "},{")          // missing comma between array objects
+    .replace(/,(\s*[}\]])/g, "$1");    // trailing commas before ] or }
   const parsed = JSON.parse(cleaned);
 
   return {
