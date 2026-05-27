@@ -47,6 +47,134 @@ function bestNameInCluster(names: string[]): string {
   return pool.reduce((best, n) => (n.length >= best.length ? n : best), pool[0]);
 }
 
+// ── Session building (runs client-side after all images are processed) ────
+
+type GameResult = {
+  players: { name: string; score: number }[];
+  time?: string;
+  note?: string;
+  index: number;
+};
+
+function areGamesDuplicate(
+  a: { players: { name: string; score: number }[] },
+  b: { players: { name: string; score: number }[] }
+): boolean {
+  if (a.players.length !== b.players.length) return false;
+  const aMap = new Map(a.players.map((p) => [p.name, p.score]));
+  for (const bp of b.players) { if (aMap.get(bp.name) !== bp.score) return false; }
+  return true;
+}
+
+function normalizeName(name: string): string {
+  return name.replace(/[.…\s]+$/, "").toLowerCase().trim();
+}
+
+function areSimilarNames(a: string, b: string): boolean {
+  if (a.trim() === b.trim()) return true;
+  const na = normalizeName(a), nb = normalizeName(b);
+  if (na === nb) return true;
+  const [shorter, longer] = na.length <= nb.length ? [na, nb] : [nb, na];
+  return shorter.length >= 2 && longer.startsWith(shorter);
+}
+
+function buildGameSession(results: GameResult[], rate: number): GameSession {
+  const games = results.map((g) => ({
+    index: g.index,
+    time: g.time,
+    valid: g.players.length > 0,
+    players: g.players.map((p) => ({ name: p.name, score: p.score, delta: p.score * rate })),
+  }));
+
+  const warnings: Warning[] = [];
+
+  // 1. Duplicate games
+  for (let i = 0; i < games.length; i++) {
+    for (let j = i + 1; j < games.length; j++) {
+      if (areGamesDuplicate(games[i], games[j])) {
+        warnings.push({ type: "duplicate", message: `第 ${i + 1} 张和第 ${j + 1} 张截图的战绩完全相同，疑似重复上传`, indices: [i, j] });
+      }
+    }
+  }
+
+  // 2. No-name players
+  const noNameNotes: string[] = [];
+  results.forEach((g, gi) => {
+    if (g.note?.includes("[noname]")) {
+      games[gi].players.filter((p) => !p.name || !p.name.trim()).forEach((p) => {
+        noNameNotes.push(`第 ${gi + 1} 场有玩家名字不可见，AI 已根据头像特征命名为「${p.name || "未知玩家"}」，请确认`);
+      });
+    }
+  });
+  if (noNameNotes.length > 0) warnings.push({ type: "noName", message: noNameNotes.join("；") });
+
+  // 3. Aggregate totals
+  const totals = new Map<string, PlayerScore & { gameCount: number }>();
+  games.forEach((game) => {
+    game.players.forEach((p) => {
+      const e = totals.get(p.name);
+      if (e) { e.score += p.score; e.delta += p.delta; e.gameCount!++; }
+      else totals.set(p.name, { name: p.name, score: p.score, delta: p.delta, gameCount: 1 });
+    });
+  });
+
+  // 4a. Auto-merge exact names
+  const allNames = Array.from(totals.keys());
+  const exactProcessed = new Set<string>();
+  for (let i = 0; i < allNames.length; i++) {
+    for (let j = i + 1; j < allNames.length; j++) {
+      const a = allNames[i], b = allNames[j];
+      if (exactProcessed.has(a) || exactProcessed.has(b)) continue;
+      if (a.trim() === b.trim()) {
+        exactProcessed.add(b);
+        const ea = totals.get(a)!, eb = totals.get(b)!;
+        ea.score += eb.score; ea.delta += eb.delta; ea.gameCount! += eb.gameCount!;
+        totals.delete(b);
+        warnings.push({ type: "duplicateName", message: `发现完全相同的玩家名"${a}"，已自动合并` });
+      }
+    }
+  }
+
+  // 4b. Fuzzy name cluster (union-find)
+  const remaining = Array.from(totals.keys());
+  const ufParent = new Map<string, string>();
+  const ufFind = (x: string): string => {
+    if (!ufParent.has(x)) ufParent.set(x, x);
+    if (ufParent.get(x) !== x) ufParent.set(x, ufFind(ufParent.get(x)!));
+    return ufParent.get(x)!;
+  };
+  const ufUnion = (a: string, b: string) => { const ra = ufFind(a), rb = ufFind(b); if (ra !== rb) ufParent.set(rb, ra); };
+  for (let i = 0; i < remaining.length; i++) {
+    for (let j = i + 1; j < remaining.length; j++) {
+      if (areSimilarNames(remaining[i], remaining[j])) ufUnion(remaining[i], remaining[j]);
+    }
+  }
+  const clusters = new Map<string, string[]>();
+  for (const name of remaining) {
+    const root = ufFind(name);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root)!.push(name);
+  }
+  for (const members of Array.from(clusters.values())) {
+    if (members.length >= 2) {
+      warnings.push({ type: "duplicateName", message: `以下名字可能是同一人：${members.join("、")}`, nameCluster: members });
+    }
+  }
+
+  const players: PlayerScore[] = Array.from(totals.values());
+  const today = new Date().toISOString().split("T")[0];
+  return {
+    id: crypto.randomUUID(),
+    date: today,
+    title: `${today} 战绩`,
+    rate,
+    players,
+    playerCount: players.length,
+    games: games.length > 0 ? games : undefined,
+    warnings: warnings.length > 0 ? warnings : undefined,
+  };
+}
+
 // ── ConfirmStep ───────────────────────────────────────────────────────────
 
 interface ConfirmStepProps {
@@ -260,6 +388,7 @@ export default function Home() {
   const [pendingSession, setPendingSession] = useState<GameSession | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [progress, setProgress] = useState("");
   const [dragOverScore, setDragOverScore] = useState(false);
   const [dragOverAlbum, setDragOverAlbum] = useState(false);
 
@@ -299,23 +428,47 @@ export default function Home() {
     if (!scoreFiles.length) { setError("请先上传战绩截图"); return; }
     setLoading(true);
     setError("");
+    setProgress("");
     try {
-      const scoreBase64s = await Promise.all(scoreFiles.map(toBase64));
-      const albumBase64 = albumFile ? await toBase64(albumFile) : null;
+      const compressed = await Promise.all(scoreFiles.map(toBase64));
+      const gameResults: GameResult[] = [];
+      const skipped: string[] = [];
 
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scoreImages: scoreBase64s, albumImage: albumBase64, rate: RATE }),
-      });
-      const data = await res.json();
-      if (!data.success) { setError(data.error || "识别失败，请重试"); return; }
+      for (let i = 0; i < compressed.length; i++) {
+        setProgress(`正在识别战绩截图 ${i + 1} / ${compressed.length}...`);
+        if (i > 0) await new Promise((r) => setTimeout(r, 1200));
+        try {
+          const res = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image: compressed[i] }),
+          });
+          const data = await res.json();
+          if (data.success && Array.isArray(data.players) && data.players.length > 0) {
+            gameResults.push({ players: data.players, time: data.time, note: data.note, index: i + 1 });
+          } else {
+            skipped.push(`第 ${i + 1} 张: ${data.error || "无法识别"}`);
+          }
+        } catch {
+          skipped.push(`第 ${i + 1} 张: 网络错误`);
+        }
+      }
 
-      const session = data.sessions[0] as GameSession;
+      setProgress("");
+      if (gameResults.length === 0) {
+        setError("所有截图均识别失败：" + skipped.join("；"));
+        return;
+      }
+
+      const session = buildGameSession(gameResults, RATE);
+      if (skipped.length > 0 && session.warnings === undefined) {
+        // no other warnings — show skip notice via error (non-blocking)
+        setError(`注意：${skipped.join("；")}`);
+      }
+
       const needsConfirm = session.warnings?.some(
         (w: Warning) => w.type === "duplicate" || w.type === "duplicateName" || w.type === "noName"
       );
-
       if (needsConfirm) {
         setPendingSession(session);
         setStep("confirming");
@@ -327,6 +480,7 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "网络错误，请重试");
     } finally {
       setLoading(false);
+      setProgress("");
     }
   };
 
@@ -438,7 +592,7 @@ export default function Home() {
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  AI 识别中...
+                  {progress || "AI 识别中..."}
                 </span>
               ) : "生成战绩卡 →"}
             </button>
