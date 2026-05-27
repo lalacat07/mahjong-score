@@ -17,6 +17,20 @@ PLAYER:玩家名,SCORE:-23
 TIME:20:30
 NOTE:如有异常说明`;
 
+function sanitizePlayers(
+  raw: { name: string; score: number }[]
+): { name: string; score: number }[] {
+  return raw
+    .map((p) => ({ ...p, name: p.name.replace(/[（(][^）)]*[）)]/g, "").trim() }))
+    .filter((p) => {
+      if (!p.name || p.name.length < 1) return false;
+      if (/PLAYER|SCORE/i.test(p.name)) return false;
+      if (/^\d+$/.test(p.name)) return false;
+      if (Math.abs(p.score) > 500) return false;
+      return true;
+    });
+}
+
 function parseGlmResponse(
   content: string
 ): { players: { name: string; score: number }[]; time?: string; note?: string } {
@@ -42,7 +56,8 @@ function parseGlmResponse(
       note = line.slice(5).trim();
     }
   }
-  if (players.length > 0) return { players, time, note };
+  const sanitized1 = sanitizePlayers(players);
+  if (sanitized1.length > 0) return { players: sanitized1, time, note };
 
   // Strategy 2: GLM returned JSON despite instructions
   const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -54,24 +69,17 @@ function parseGlmResponse(
         .replace(/,(\s*[}\]])/g, "$1");
       const parsed = JSON.parse(cleaned);
       const jsonPlayers = ((parsed.players || []) as Record<string, unknown>[])
-        .map((p) => ({ name: String(p.name || "").trim(), score: parseInt(String(p.score), 10) || 0 }))
-        .filter((p) => p.name);
-      if (jsonPlayers.length > 0) {
+        .map((p) => ({ name: String(p.name || "").trim(), score: parseInt(String(p.score), 10) || 0 }));
+      const sanitized2 = sanitizePlayers(jsonPlayers);
+      if (sanitized2.length > 0) {
         return {
-          players: jsonPlayers,
+          players: sanitized2,
           time: parsed.time && parsed.time !== "null" ? String(parsed.time) : undefined,
           note: String(parsed.note || ""),
         };
       }
     } catch { /* fall through */ }
   }
-
-  // Strategy 3: loose regex — match lines like "玩家名：+42"
-  const looseMatches = Array.from(content.matchAll(/^(.{1,20}?)[：:]\s*([+-]?\d+)\s*$/gm));
-  const loosePlayers = looseMatches
-    .map((m) => ({ name: m[1].trim(), score: parseInt(m[2], 10) }))
-    .filter((p) => p.name && !isNaN(p.score) && !/时间|time|note|valid/i.test(p.name));
-  if (loosePlayers.length > 0) return { players: loosePlayers, time, note };
 
   return { players: [], note };
 }

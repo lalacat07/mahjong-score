@@ -76,9 +76,12 @@ export default function ScoreCard({ session }: ScoreCardProps) {
       const html2canvas = (await import("html2canvas")).default;
       const el = cardRef.current;
 
-      // Pin width to a fixed pixel value so html2canvas doesn't misalign flex children
+      // Force the card to its full calculated width during capture so the
+      // table layout isn't constrained by maxWidth: "100%" on narrow screens.
       const originalWidth = el.style.width;
-      el.style.width = el.offsetWidth + "px";
+      const originalMaxWidth = el.style.maxWidth;
+      el.style.width = cardWidth + "px";
+      el.style.maxWidth = "none";
 
       const canvas = await html2canvas(el, {
         scale: 2,
@@ -86,11 +89,12 @@ export default function ScoreCard({ session }: ScoreCardProps) {
         useCORS: true,
         allowTaint: false,
         logging: false,
-        windowWidth: el.scrollWidth,
+        windowWidth: cardWidth,
         windowHeight: el.scrollHeight,
       });
 
       el.style.width = originalWidth;
+      el.style.maxWidth = originalMaxWidth;
 
       const dataUrl = canvas.toDataURL("image/png");
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
