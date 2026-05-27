@@ -135,13 +135,13 @@ async function analyzeOneImage(
       data.choices?.[0]?.delta?.content ||
       "";
 
-    if (!content) {
-      throw new Error(`GLM空内容，完整响应: ${JSON.stringify(data).slice(0, 300)}`);
+    if (!content.trim()) {
+      throw new Error(`GLM返回了空内容。完整响应: ${JSON.stringify(data).slice(0, 400)}`);
     }
 
     const result = parseGlmResponse(content);
     if (result.players.length === 0) {
-      throw new Error(`AI 返回格式错误。GLM原始回复: ${content.slice(0, 300)}`);
+      throw new Error(`AI无法识别战绩格式。GLM原始回复: ${content.slice(0, 400)}`);
     }
     return result;
   }

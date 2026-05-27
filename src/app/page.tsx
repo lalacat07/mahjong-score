@@ -277,20 +277,18 @@ export default function Home() {
 
   const removeScoreFile = (i: number) => setScoreFiles((prev) => prev.filter((_, j) => j !== i));
 
-  // Compress image to max 800px on longest side / 70% quality before base64 encoding
-  // Keeps token usage within GLM free tier limit when uploading many images at once
   const toBase64 = (file: File): Promise<string> =>
     new Promise((resolve, reject) => {
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(url);
-        const scale = Math.min(500 / img.width, 500 / img.height, 1);
+        const scale = Math.min(700 / img.width, 700 / img.height, 1);
         const canvas = document.createElement("canvas");
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
         canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.65);
         resolve(dataUrl.split(",")[1]);
       };
       img.onerror = reject;
