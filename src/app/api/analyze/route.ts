@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PlayerScore, SingleGame, GameSession, Warning } from "@/lib/types";
 
+export const maxDuration = 60;
+
 const PROMPT = `你是川麻（四川麻将）战绩识别专家。
 分析这张游戏结算截图，提取每位玩家的姓名和积分。
 
@@ -121,12 +123,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Analyze each screenshot ──────────────────────────────────────────
-    const gameResults = await Promise.all(
-      scoreImages.map((b64: string, i: number) =>
-        analyzeOneImage(b64).then((r) => ({ ...r, index: i + 1 }))
-      )
-    );
+    // ── Analyze each screenshot sequentially to avoid GLM rate limits ────
+    const gameResults: Array<{ players: { name: string; score: number }[]; time?: string; valid: boolean; note?: string; index: number }> = [];
+    for (let i = 0; i < scoreImages.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 1000));
+      const result = await analyzeOneImage(scoreImages[i] as string);
+      gameResults.push({ ...result, index: i + 1 });
+    }
 
     // ── Build per-game data ──────────────────────────────────────────────
     const games: SingleGame[] = gameResults.map((g) => ({

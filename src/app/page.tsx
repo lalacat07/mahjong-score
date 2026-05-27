@@ -285,12 +285,12 @@ export default function Home() {
       const url = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(url);
-        const scale = Math.min(800 / img.width, 800 / img.height, 1);
+        const scale = Math.min(500 / img.width, 500 / img.height, 1);
         const canvas = document.createElement("canvas");
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
         canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
         resolve(dataUrl.split(",")[1]);
       };
       img.onerror = reject;
