@@ -31,7 +31,7 @@ async function analyzeOneImage(
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "glm-4.6v-flash",
+      model: "glm-4.6v-flashx",
       messages: [
         {
           role: "user",
